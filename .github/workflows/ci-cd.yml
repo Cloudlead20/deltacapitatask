@@ -1,0 +1,106 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  IMAGE_TAG: ${{ github.run_number }}
+  AWS_REGION: 'us-east-1'
+  ECR_REPO_URL: '637423531852.dkr.ecr.us-east-1.amazonaws.com'
+  DEPLOYMENT_YAML: 'k8_manifest_file/backend/backend_deployment.yaml'
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Clean workspace
+        run: rm -rf *
+
+  build:
+    runs-on: ubuntu-latest
+    needs: clean
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Set up Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: '14'
+      - name: Install dependencies
+        run: npm install
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Set up Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: '14'
+      - name: Run tests
+        run: npm test
+
+  sonar:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Set up SonarQube scanner
+        uses: sonarsource/sonarcloud-github-action@master
+        with:
+          projectBaseDir: ./
+          args: >
+            -Dsonar.projectKey=chat-app-backend
+            -Dsonar.sources=.
+            -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }}
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: sonar
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Set up Docker
+        uses: actions/setup-docker@v1
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+        with:
+          region: ${{ env.AWS_REGION }}
+      - name: Build Docker image
+        run: |
+          cd Backend
+          docker build --no-cache -t backend:${{ env.IMAGE_TAG }} .
+      - name: Tag Docker image
+        run: docker tag backend:${{ env.IMAGE_TAG }} ${{ env.ECR_REPO_URL }}/backend:${{ env.IMAGE_TAG }}
+      - name: Push Docker image to Amazon ECR
+        run: docker push ${{ env.ECR_REPO_URL }}/backend:${{ env.IMAGE_TAG }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: docker
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Update Kubernetes deployment
+        run: |
+          sed -i "s|IMAGE_TAG_PLACEHOLDER|${{ env.ECR_REPO_URL }}/backend:${{ env.IMAGE_TAG }}|" ${{ env.DEPLOYMENT_YAML }}
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v1
+        with:
+          version: 'latest'
+      - name: Deploy to Kubernetes
+        env:
+          KUBECONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          cd k8_manifest_file/backend
+          echo "${{ secrets.KUBE_CONFIG }}" > kubeconfig
+          kubectl apply -f .
